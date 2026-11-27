@@ -79,6 +79,8 @@ final class KeyCanvasView: UIView, UIInputViewAudioFeedback {
         isMultipleTouchEnabled = true
         isExclusiveTouch = false
         clipsToBounds = false
+        layer.actions = ["sublayers": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        keysLayer.actions = ["sublayers": NSNull(), "bounds": NSNull(), "position": NSNull()]
 
         layer.addSublayer(keysLayer)
         addSubview(popupOverlay)

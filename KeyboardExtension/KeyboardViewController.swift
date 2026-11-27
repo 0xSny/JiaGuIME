@@ -1,36 +1,5 @@
 import UIKit
 
-/// Root view that forwards window attachment & trait updates directly to the controller.
-final class KeyboardRootView: UIView {
-    var onTraitsOrWindowChanged: (() -> Void)?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = true
-        if #available(iOS 17.0, *) {
-            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: KeyboardRootView, _) in
-                self.onTraitsOrWindowChanged?()
-            }
-        }
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        if window != nil {
-            onTraitsOrWindowChanged?()
-        }
-    }
-
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-        super.traitCollectionDidChange(previousTraitCollection)
-        onTraitsOrWindowChanged?()
-    }
-}
-
 @objc(JiaGuKeyboardViewController)
 final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegate, CandidateBarDelegate {
 
@@ -42,7 +11,6 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         case quickSettings
     }
 
-    private let rootContainer = KeyboardRootView()
     private let candidateBar = CandidateBarView()
     private let keyCanvas = KeyCanvasView()
     private let candidateGrid = CandidateGridView()
@@ -64,10 +32,23 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
     private let settingsStore = SettingsStore.shared
     private var settings: IMESettings = SettingsStore.shared.settings
 
-    private let appearanceMonitor = AppearanceMonitor()
-    private var currentPalette: KeyboardPalette = .crispLight
-    private var lastAppliedIsDark: Bool?
-    private var lastAppliedMode: AppearanceMode?
+    private lazy var themeController = ThemeController(
+        inputs: { [unowned self] in
+            ThemeController.Inputs(
+                appearanceMode: self.settings.appearanceMode,
+                proxyAppearance: self.textDocumentProxy.keyboardAppearance,
+                traits: [
+                    self.traitCollection,
+                    self.view.window?.traitCollection,
+                    (self.view.window?.screen ?? UIScreen.main).traitCollection
+                ].compactMap { $0 }
+            )
+        },
+        apply: { [unowned self] palette in
+            self.applyTheme(palette)
+        }
+    )
+    private var currentPalette: KeyboardPalette { themeController.currentPalette }
 
     private var activePanel: ActivePanel = .letters
     private var isEnglishMode = false
@@ -83,15 +64,10 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
     private var dismissedClipboardChangeCount: Int = -1
     private var clipboardHideWork: DispatchWorkItem?
 
-    override func loadView() {
-        let inputView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
-        inputView.allowsSelfSizing = true
-        self.inputView = inputView
-        self.view = inputView
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.isMultipleTouchEnabled = true
+        view.backgroundColor = KeyboardPalette.crispLight.keyboardBackground
 
         // Initialize C++17 mmap lexicon + user storage
         let lexPath = Bundle.main.path(forResource: "jiagu_lexicon", ofType: "bin") ?? ""
@@ -99,30 +75,24 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         engine = JiaGuEngineBridge(lexiconPath: lexPath, userStorageDir: userDir)
         applyEngineConfig(settings)
 
-        // Build pure-frame root hierarchy
-        rootContainer.translatesAutoresizingMaskIntoConstraints = false
-        rootContainer.onTraitsOrWindowChanged = { [weak self] in
-            self?.syncAppearance(forceRepaint: false)
-        }
-        view.addSubview(rootContainer)
-
-        NSLayoutConstraint.activate([
-            rootContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            rootContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            rootContainer.topAnchor.constraint(equalTo: view.topAnchor),
-            rootContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
-
         let totalH = candidateBarHeight + CGFloat(settings.keyboardHeight)
-        let hc = rootContainer.heightAnchor.constraint(equalToConstant: totalH)
-        hc.priority = .defaultHigh
-        hc.isActive = true
+        let hc = NSLayoutConstraint(
+            item: view as Any,
+            attribute: .height,
+            relatedBy: .equal,
+            toItem: nil,
+            attribute: .notAnAttribute,
+            multiplier: 1,
+            constant: totalH
+        )
+        hc.priority = UILayoutPriority(999)
+        view.addConstraint(hc)
         self.heightConstraint = hc
 
         candidateBar.delegate = self
         keyCanvas.delegate = self
-        rootContainer.addSubview(candidateBar)
-        rootContainer.addSubview(keyCanvas)
+        view.addSubview(candidateBar)
+        view.addSubview(keyCanvas)
 
         candidateGrid.isHidden = true
         candidateGrid.onSelectCandidate = { [weak self] idx in
@@ -132,7 +102,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         candidateGrid.onClose = { [weak self] in
             self?.switchPanel(to: .letters)
         }
-        rootContainer.addSubview(candidateGrid)
+        view.addSubview(candidateGrid)
 
         numberPad.isHidden = true
         numberPad.onInsertText = { [weak self] text in
@@ -150,7 +120,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         numberPad.onEnter = { [weak self] in
             self?.keyCanvasDidTapEnter()
         }
-        rootContainer.addSubview(numberPad)
+        view.addSubview(numberPad)
 
         symbolPanel.isHidden = true
         symbolPanel.onInsertSymbol = { [weak self] text, offset in
@@ -162,7 +132,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         symbolPanel.onClose = { [weak self] in
             self?.switchPanel(to: .letters)
         }
-        rootContainer.addSubview(symbolPanel)
+        view.addSubview(symbolPanel)
 
         quickSettings.isHidden = true
         quickSettings.onSettingsChanged = { [weak self] newSettings in
@@ -177,7 +147,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         quickSettings.onClose = { [weak self] in
             self?.switchPanel(to: .letters)
         }
-        rootContainer.addSubview(quickSettings)
+        view.addSubview(quickSettings)
 
         setupForgetBanner()
 
@@ -188,22 +158,21 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
             self.applySettingsUpdate()
         }
 
-        // Layer 1 & 2 of Dark Mode Defense: observe both NSExtensionHost* and UIApplication* lifecycle
         registerLifecycleObservers()
 
         if #available(iOS 17.0, *) {
-            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: JiaGuKeyboardViewController, previousTraitCollection: UITraitCollection) in
-                self.syncAppearance(forceRepaint: false, previousTraitStyle: previousTraitCollection.userInterfaceStyle)
+            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: JiaGuKeyboardViewController, _) in
+                self.themeController.refreshSettling()
             }
         }
 
-        syncAppearance(forceRepaint: true)
+        themeController.refresh(force: true)
         refreshKeyCanvasState()
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        appearanceMonitor.cancelResumeTicks()
+        themeController.cancelSettling()
     }
 
     private func setupForgetBanner() {
@@ -227,16 +196,15 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         forgetBanner.addSubview(forgetLabel)
         forgetBanner.addSubview(forgetConfirmBtn)
         forgetBanner.addSubview(forgetCancelBtn)
-        rootContainer.addSubview(forgetBanner)
+        view.addSubview(forgetBanner)
     }
 
     private func registerLifecycleObservers() {
         let nc = NotificationCenter.default
-        nc.addObserver(self, selector: #selector(handleHostWillResignActive), name: NSNotification.Name.NSExtensionHostWillResignActive, object: nil)
-        nc.addObserver(self, selector: #selector(handleHostWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
-
-        nc.addObserver(self, selector: #selector(handleHostDidEnterBackground), name: NSNotification.Name.NSExtensionHostDidEnterBackground, object: nil)
-        nc.addObserver(self, selector: #selector(handleHostDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostResignOrBackground), name: NSNotification.Name.NSExtensionHostWillResignActive, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostResignOrBackground), name: UIApplication.willResignActiveNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostResignOrBackground), name: NSNotification.Name.NSExtensionHostDidEnterBackground, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostResignOrBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
 
         nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: NSNotification.Name.NSExtensionHostWillEnterForeground, object: nil)
         nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: NSNotification.Name.NSExtensionHostDidBecomeActive, object: nil)
@@ -244,36 +212,30 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
-    @objc private func handleHostWillResignActive() {
-        appearanceMonitor.markResignActive()
-        engine.flushUserLexiconAsync()
-    }
-
-    @objc private func handleHostDidEnterBackground() {
-        appearanceMonitor.markDidEnterBackground()
+    @objc private func handleHostResignOrBackground() {
         engine.flushUserLexiconAsync()
     }
 
     @objc private func handleHostBecomeActive() {
-        appearanceMonitor.markBecomeActive { [weak self] forceRepaint in
-            self?.syncAppearance(forceRepaint: forceRepaint)
-        }
+        themeController.refreshSettling(force: true)
         settingsStore.reloadFromDisk()
         checkClipboardForQuickPaste()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        appearanceMonitor.markBecomeActive { [weak self] forceRepaint in
-            self?.syncAppearance(forceRepaint: forceRepaint)
-        }
         settingsStore.reloadFromDisk()
+        settings = settingsStore.settings
+        applyEngineConfig(settings)
+        heightConstraint?.constant = candidateBarHeight + CGFloat(settings.keyboardHeight)
+        themeController.refreshSettling(force: true)
+        refreshKeyCanvasState()
         checkClipboardForQuickPaste()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        syncAppearance(forceRepaint: true)
+        themeController.refreshSettling()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -281,15 +243,10 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         engine.flushUserLexiconAsync()
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        appearanceMonitor.markKeyboardDismissed()
-    }
-
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let w = rootContainer.bounds.width
-        let h = rootContainer.bounds.height
+        let w = view.bounds.width
+        let h = view.bounds.height
         guard w > 0, h > 0 else { return }
 
         candidateBar.frame = CGRect(x: 0, y: 0, width: w, height: candidateBarHeight)
@@ -304,25 +261,21 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         forgetLabel.frame = CGRect(x: 12, y: 0, width: max(40, forgetBanner.bounds.width - 140), height: 36)
         forgetConfirmBtn.frame = CGRect(x: forgetBanner.bounds.width - 122, y: 0, width: 68, height: 36)
         forgetCancelBtn.frame = CGRect(x: forgetBanner.bounds.width - 52, y: 0, width: 46, height: 36)
-
-        if view.window != nil {
-            syncAppearance(forceRepaint: false)
-        }
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
-        syncAppearance(forceRepaint: false, previousTraitStyle: previousTraitCollection?.userInterfaceStyle)
+        themeController.refreshSettling()
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
-        syncAppearance(forceRepaint: false)
+        themeController.refreshSettling()
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
-        syncAppearance(forceRepaint: false)
+        themeController.refreshSettling()
         refreshKeyCanvasState()
 
         if !isInternalProxyMutation && engine.strokeCount() > 0 {
@@ -333,41 +286,23 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
 
     override func selectionWillChange(_ textInput: UITextInput?) {
         super.selectionWillChange(textInput)
-        syncAppearance(forceRepaint: false)
+        themeController.refreshSettling()
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
-        syncAppearance(forceRepaint: false)
+        themeController.refreshSettling()
         if !isInternalProxyMutation && engine.strokeCount() > 0 {
             clearCompositionState(clearMarkedText: true)
         }
     }
 
-    // MARK: - 5-Layer Dark Mode Sync
+    // MARK: - Theme Application (Single Animation-Free Pass)
 
-    private func syncAppearance(forceRepaint: Bool, previousTraitStyle: UIUserInterfaceStyle? = nil) {
-        let isDark = appearanceMonitor.resolveIsDark(
-            mode: settings.appearanceMode,
-            viewController: self,
-            rootView: rootContainer,
-            previousTraitStyle: previousTraitStyle
-        )
-        let palette = KeyboardPalette.resolve(mode: settings.appearanceMode, isDark: isDark)
-
-        if !forceRepaint && lastAppliedIsDark == isDark && lastAppliedMode == settings.appearanceMode && palette == currentPalette {
-            return
-        }
-
-        lastAppliedIsDark = isDark
-        lastAppliedMode = settings.appearanceMode
-        currentPalette = palette
-
+    private func applyTheme(_ palette: KeyboardPalette) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         view.backgroundColor = palette.keyboardBackground
-        rootContainer.backgroundColor = palette.keyboardBackground
-        rootContainer.layer.backgroundColor = palette.keyboardBackground.cgColor
 
         candidateBar.applyPalette(palette)
         keyCanvas.forceRepaint(palette: palette)
@@ -385,7 +320,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
     private func applySettingsUpdate() {
         applyEngineConfig(settings)
         heightConstraint?.constant = candidateBarHeight + CGFloat(settings.keyboardHeight)
-        syncAppearance(forceRepaint: true)
+        themeController.refresh(force: true)
         refreshKeyCanvasState()
         if engine.strokeCount() > 0 {
             triggerAsyncDecode()
@@ -546,7 +481,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
     // MARK: - KeyCanvasDelegate
 
     func keyCanvasWillBeginInteraction() {
-        syncAppearance(forceRepaint: false)
+        themeController.refresh()
     }
 
     func keyCanvasDidTapLetter(_ sample: SpatialTouchSample) {

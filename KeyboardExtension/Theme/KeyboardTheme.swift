@@ -105,131 +105,100 @@ struct KeyboardPalette: Equatable {
     }
 }
 
-/// 5-Layer Dark Mode App-Switch Defense:
-/// Prevents iOS multitasking snapshotter's `.light` background trait pass from poisoning
-/// extension CALayers, and reconciles multi-source traits across XPC resume delays.
-final class AppearanceMonitor {
-    private(set) var isHostForeground: Bool = true
-    private(set) var didBackgroundDuringSession: Bool = false
-    private(set) var wasDarkBeforeBackground: Bool = false
-    private(set) var lastKnownForegroundDark: Bool = false
-    private(set) var lastForegroundResumeTime: CFTimeInterval = 0
-    private var resumeWorkItems: [DispatchWorkItem] = []
-
-    func markResignActive() {
-        isHostForeground = false
-        wasDarkBeforeBackground = wasDarkBeforeBackground || lastKnownForegroundDark
-        cancelResumeTicks()
+/// Single owner of the keyboard colour scheme (absorbed from Xiaoxiang IME's proven settling pattern).
+/// Merges controller / window / screen traits + host proxy appearance, ignores `.unspecified` readings,
+/// and re-evaluates across the XPC app-switch settling window without any permanent background latch.
+final class ThemeController {
+    enum ResolvedKind: Equatable {
+        case crispLight
+        case pureWhite
+        case dark
     }
 
-    func markDidEnterBackground() {
-        markResignActive()
-        didBackgroundDuringSession = true
+    struct Inputs {
+        var appearanceMode: AppearanceMode
+        var proxyAppearance: UIKeyboardAppearance
+        var traits: [UITraitCollection]
     }
 
-    func markKeyboardDismissed() {
-        didBackgroundDuringSession = false
-        wasDarkBeforeBackground = false
-        cancelResumeTicks()
+    private(set) var kind: ResolvedKind = .crispLight
+    private var applied: ResolvedKind?
+    private var lastSystemDark: Bool = false
+    private var settleToken: Int = 0
+    private var lastSettleStart: CFTimeInterval = 0
+
+    private let inputs: () -> Inputs
+    private let apply: (KeyboardPalette) -> Void
+
+    init(inputs: @escaping () -> Inputs, apply: @escaping (KeyboardPalette) -> Void) {
+        self.inputs = inputs
+        self.apply = apply
     }
 
-    func markBecomeActive(onTick: @escaping (_ forceRepaint: Bool) -> Void) {
-        isHostForeground = true
-        lastForegroundResumeTime = CACurrentMediaTime()
-        onTick(true)
-        scheduleResumeTicks(onTick: onTick)
+    var currentPalette: KeyboardPalette {
+        ThemeController.palette(for: kind)
     }
 
-    func cancelResumeTicks() {
-        for item in resumeWorkItems {
-            item.cancel()
+    static func palette(for kind: ResolvedKind) -> KeyboardPalette {
+        switch kind {
+        case .crispLight: return .crispLight
+        case .pureWhite: return .pureWhite
+        case .dark: return .dark
         }
-        resumeWorkItems.removeAll()
     }
 
-    private func scheduleResumeTicks(onTick: @escaping (_ forceRepaint: Bool) -> Void) {
-        cancelResumeTicks()
-        let delays: [TimeInterval] = [0.05, 0.16, 0.35, 0.70]
-        for delay in delays {
-            let item = DispatchWorkItem { [weak self] in
-                guard let self, self.isHostForeground else { return }
-                onTick(true)
+    func refresh(force: Bool = false) {
+        let i = inputs()
+        let resolved = resolve(i)
+        kind = resolved
+        if force || applied != resolved {
+            applied = resolved
+            apply(ThemeController.palette(for: resolved))
+        }
+    }
+
+    func refreshSettling(force: Bool = false) {
+        refresh(force: force)
+        let now = CACurrentMediaTime()
+        if !force && (now - lastSettleStart) < 0.5 { return }
+        lastSettleStart = now
+        settleToken += 1
+        let token = settleToken
+        for delay in [0.06, 0.25, 0.8, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.settleToken == token else { return }
+                self.refresh()
             }
-            resumeWorkItems.append(item)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
         }
     }
 
-    func resolveIsDark(mode: AppearanceMode,
-                       viewController: UIInputViewController,
-                       rootView: UIView,
-                       previousTraitStyle: UIUserInterfaceStyle? = nil) -> Bool {
-        switch mode {
-        case .crispLight, .pureWhite:
-            return false
+    func cancelSettling() {
+        settleToken += 1
+    }
+
+    private func resolve(_ i: Inputs) -> ResolvedKind {
+        switch i.appearanceMode {
         case .dark:
-            return true
+            return .dark
+        case .crispLight:
+            return .crispLight
+        case .pureWhite:
+            return .pureWhite
         case .followSystem:
-            break
+            let hostDark = (i.proxyAppearance == .dark || i.proxyAppearance == .alert)
+            return (hostDark || systemDark(i.traits)) ? .dark : .crispLight
         }
+    }
 
-        // Never allow background snapshotter to downgrade dark -> light
-        if !isHostForeground {
-            return lastKnownForegroundDark
+    /// Dark when any determinate trait says dark; `.unspecified` readings are ignored.
+    private func systemDark(_ traits: [UITraitCollection]) -> Bool {
+        var determinate = false
+        var dark = false
+        for t in traits where t.userInterfaceStyle != .unspecified {
+            determinate = true
+            if t.userInterfaceStyle == .dark { dark = true }
         }
-
-        // Genuine live foreground Dark -> Light toggle (e.g. Control Center) clears background lock
-        if previousTraitStyle == .dark &&
-            viewController.traitCollection.userInterfaceStyle == .light &&
-            (CACurrentMediaTime() - lastForegroundResumeTime) > 0.25 {
-            didBackgroundDuringSession = false
-            wasDarkBeforeBackground = false
-        }
-
-        let proxy = viewController.textDocumentProxy.keyboardAppearance
-        let windowStyle = rootView.window?.traitCollection.userInterfaceStyle ?? .unspecified
-        let sceneStyle = rootView.window?.windowScene?.traitCollection.userInterfaceStyle ?? .unspecified
-        let viewStyle = rootView.traitCollection.userInterfaceStyle
-        let vcStyle = viewController.traitCollection.userInterfaceStyle
-        let screenStyle = (rootView.window?.windowScene?.screen ?? UIScreen.main).traitCollection.userInterfaceStyle
-        let currentStyle = UITraitCollection.current.userInterfaceStyle
-
-        let anyDarkSignal = (proxy == .dark ||
-                             windowStyle == .dark ||
-                             sceneStyle == .dark ||
-                             viewStyle == .dark ||
-                             vcStyle == .dark ||
-                             screenStyle == .dark ||
-                             currentStyle == .dark)
-
-        let resolved: Bool
-        switch proxy {
-        case .dark:
-            resolved = true
-        case .light:
-            if anyDarkSignal {
-                resolved = true
-            } else if didBackgroundDuringSession && wasDarkBeforeBackground &&
-                        (CACurrentMediaTime() - lastForegroundResumeTime) < 0.8 {
-                resolved = true
-            } else {
-                resolved = false
-            }
-        case .default, .alert:
-            fallthrough
-        @unknown default:
-            if anyDarkSignal {
-                resolved = true
-            } else if didBackgroundDuringSession && wasDarkBeforeBackground {
-                resolved = true
-            } else if windowStyle == .unspecified && viewStyle == .unspecified && vcStyle == .unspecified {
-                resolved = lastKnownForegroundDark
-            } else {
-                resolved = false
-            }
-        }
-
-        lastKnownForegroundDark = resolved
-        return resolved
+        if determinate { lastSystemDark = dark }
+        return determinate ? dark : lastSystemDark
     }
 }
