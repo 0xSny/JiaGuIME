@@ -1,0 +1,59 @@
+name: JiaGuIME
+options:
+  bundleIdPrefix: com.custom
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.2"
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: ""
+    GENERATE_INFOPLIST_FILE: NO
+    SWIFT_VERSION: "5.0"
+    CLANG_CXX_LANGUAGE_STANDARD: c++17
+    CLANG_CXX_LIBRARY: libc++
+targets:
+  JiaGuIME:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: HostApp
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.custom.ime
+        PRODUCT_NAME: JiaGuIME
+        INFOPLIST_FILE: HostApp/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: JiaGuKeyboard
+        embed: true
+
+  JiaGuKeyboard:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: KeyboardExtension
+      - path: Shared
+      - path: Engine/include
+      - path: Engine/src
+      - path: Resources/jiagu_lexicon.bin
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.custom.ime.keyboard
+        PRODUCT_NAME: JiaGuKeyboard
+        INFOPLIST_FILE: KeyboardExtension/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: KeyboardExtension/Bridge/JiaGuKeyboard-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Engine/include"
+          - "$(SRCROOT)/KeyboardExtension/Bridge"
+        OTHER_LDFLAGS:
+          - "-lc++"

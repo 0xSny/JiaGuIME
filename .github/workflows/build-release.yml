@@ -1,0 +1,162 @@
+name: Build & Deploy JiaGuIME Release
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: build-and-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      build_num: ${{ steps.meta.outputs.build_num }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      ipa_name: ${{ steps.meta.outputs.ipa_name }}
+      ipa_size: ${{ steps.meta.outputs.ipa_size }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute version & build metadata
+        id: meta
+        run: |
+          SHORT_VER="1.0.${{ github.run_number }}"
+          BUILD_NUM="${{ github.run_number }}"
+          TAG="v${SHORT_VER}"
+          IPA_NAME="JiaGuIME-${SHORT_VER}.ipa"
+          echo "version=${SHORT_VER}" >> "$GITHUB_OUTPUT"
+          echo "build_num=${BUILD_NUM}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=${IPA_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python & dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pillow & XcodeGen
+        run: |
+          pip install --quiet pillow
+          brew install xcodegen
+
+      - name: Compile rime-ice offline mmap lexicon
+        run: |
+          python3 tools/build_lexicon.py --output Resources/jiagu_lexicon.bin
+          ls -lh Resources/jiagu_lexicon.bin
+
+      - name: Run C++17 engine unit tests
+        run: |
+          clang++ -std=c++17 -O2 -Wall -Wextra -I Engine/include \
+            Engine/src/SyllableTable.cpp \
+            Engine/src/SystemLexicon.cpp \
+            Engine/src/UserLexicon.cpp \
+            Engine/src/Decoder.cpp \
+            Engine/src/EngineAPI.cpp \
+            Engine/tests/test_engine.cpp \
+            -o /tmp/test_engine
+          /tmp/test_engine Resources/jiagu_lexicon.bin
+
+      - name: Generate AppIcons & stamp Info.plist versions
+        run: |
+          python3 tools/generate_icons.py
+          for plist in HostApp/Info.plist KeyboardExtension/Info.plist; do
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.meta.outputs.version }}" "$plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ steps.meta.outputs.build_num }}" "$plist"
+          done
+
+      - name: Generate Xcode project via XcodeGen
+        run: |
+          xcodegen generate
+
+      - name: Build unsigned arm64 Release
+        run: |
+          xcodebuild \
+            -project JiaGuIME.xcodeproj \
+            -scheme JiaGuIME \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package & QA verify IPA
+        id: pkg
+        run: |
+          chmod +x tools/package_and_verify.sh
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/JiaGuIME.app"
+          OUT_IPA="dist/${{ steps.meta.outputs.ipa_name }}"
+          ./tools/package_and_verify.sh "$APP_PATH" "$OUT_IPA" "${{ steps.meta.outputs.version }}" "${{ steps.meta.outputs.build_num }}"
+          IPA_SIZE="$(stat -f%z "$OUT_IPA")"
+          echo "ipa_size=${IPA_SIZE}" >> "$GITHUB_OUTPUT"
+
+      - name: Set ipa_size output
+        id: meta_size
+        run: echo "size=${{ steps.pkg.outputs.ipa_size }}"
+
+      - name: Upload IPA workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JiaGuIME-IPA
+          path: dist/${{ steps.meta.outputs.ipa_name }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: "甲骨输入法 v${{ steps.meta.outputs.version }}"
+          body: |
+            纯血 C++17 自研 iOS 中文输入法（全拼 + 小鹤双拼）未签名 Release IPA。
+            - Bundle ID: `com.custom.ime` / `com.custom.ime.keyboard`
+            - Build: `${{ steps.meta.outputs.build_num }}`
+            - 词库：`iDvel/rime-ice` 离线编译 mmap 二进制
+          files: dist/${{ steps.meta.outputs.ipa_name }}
+          make_latest: true
+
+      - name: Update AppSource JSON & Pages files
+        run: |
+          OWNER="${GITHUB_REPOSITORY%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          COMMIT_MSG="$(git log -1 --pretty=%s)"
+          python3 tools/update_appsource.py \
+            --owner "$OWNER" \
+            --repo "$REPO" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --build "${{ steps.meta.outputs.build_num }}" \
+            --tag "${{ steps.meta.outputs.tag_name }}" \
+            --ipa-name "${{ steps.meta.outputs.ipa_name }}" \
+            --ipa-size "${{ steps.pkg.outputs.ipa_size }}" \
+            --changelog "$COMMIT_MSG" \
+            --docs-dir docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy_pages:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

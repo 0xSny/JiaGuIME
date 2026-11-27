@@ -1,0 +1,13 @@
+build/
+dist/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+Resources/jiagu_lexicon.bin
+rime-ice/
+.DS_Store
+__pycache__/
+*.pyc
+*.ipa
+*.dSYM.zip
+xcuserdata/
