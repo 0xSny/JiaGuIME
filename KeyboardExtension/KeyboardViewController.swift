@@ -36,7 +36,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         inputs: { [unowned self] in
             ThemeController.Inputs(
                 appearanceMode: self.settings.appearanceMode,
-                proxyAppearance: self.textDocumentProxy.keyboardAppearance,
+                proxyAppearance: self.textDocumentProxy.keyboardAppearance ?? .default,
                 traits: [
                     self.traitCollection,
                     self.view.window?.traitCollection,
