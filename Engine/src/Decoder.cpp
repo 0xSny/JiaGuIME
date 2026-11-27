@@ -387,9 +387,10 @@ DecodeOutput Decoder::decode(const std::vector<KeyStroke>& strokes,
                     const WordEntry* we = sysLex_.wordAt(wid);
                     if (!we) continue;
                     std::string_view wtext = sysLex_.wordText(*we);
-                    float baseScore = static_cast<float>(we->logFreq) * 0.001f + nextPen * 6.0f;
+                    float freqScale = (we->charCount == 1) ? 0.00045f : 0.001f;
+                    float baseScore = static_cast<float>(we->logFreq) * freqScale + nextPen * 6.0f;
                     if (nextExact) baseScore += 18.0f;
-                    if (we->charCount > 1) baseScore += static_cast<float>(we->charCount) * 4.5f;
+                    if (we->charCount > 1) baseScore += static_cast<float>(we->charCount) * 24.0f;
 
                     // Context bigram bonus when starting at pos 0
                     if (startPos == 0 && !prevCommittedWord.empty()) {
@@ -417,7 +418,7 @@ DecodeOutput Decoder::decode(const std::vector<KeyStroke>& strokes,
                         pm.text = ur.first;
                         pm.syllables = nextSyls;
                         pm.sysWordId = 0;
-                        pm.score = ur.second + 55.0f + nextPen * 5.0f + (nextExact ? 18.0f : 0.0f);
+                        pm.score = ur.second + 85.0f + static_cast<float>(nextSyls.size()) * 26.0f + nextPen * 5.0f + (nextExact ? 18.0f : 0.0f);
                         pm.isUserWord = true;
                         pm.isExact = nextExact;
                         outMatches.push_back(std::move(pm));
@@ -512,13 +513,13 @@ DecodeOutput Decoder::decode(const std::vector<KeyStroke>& strokes,
         return out;
     }
 
-    // Emit whole-sentence Viterbi candidates from beams[n]
+    // Emit full-coverage Viterbi candidates from beams[n] (both single-phrase and multi-segment sentences)
     std::sort(beams[n].begin(), beams[n].end(),
               [](const BeamHyp& a, const BeamHyp& b) { return a.score > b.score; });
 
-    for (size_t bi = 0; bi < beams[n].size() && bi < 4; ++bi) {
+    for (size_t bi = 0; bi < beams[n].size() && bi < 6; ++bi) {
         const auto& h = beams[n][bi];
-        if (h.segs.size() >= 2) {
+        if (!h.segs.empty()) {
             CandidateItem item;
             for (const auto& s : h.segs) {
                 item.text += s.text;
