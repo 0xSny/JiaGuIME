@@ -128,9 +128,9 @@ xiaoheExpandedPreedit:(BOOL)expandedPreedit {
 
 - (void)requestAsyncDecode:(void (^)(JiaGuDecodeResultObjC *result))completion {
     uint64_t gen = _engine.bumpGeneration();
-    __weak typeof(self) weakSelf = self;
+    __weak JiaGuEngineBridge *weakSelf = self;
     dispatch_async(_decodeQueue, ^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
+        __strong JiaGuEngineBridge *strongSelf = weakSelf;
         if (!strongSelf) return;
 
         jiagu::DecodeOutput out;
