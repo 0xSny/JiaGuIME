@@ -110,12 +110,26 @@ struct KeyboardPalette: Equatable {
 /// extension CALayers, and reconciles multi-source traits across XPC resume delays.
 final class AppearanceMonitor {
     private(set) var isHostForeground: Bool = true
+    private(set) var didBackgroundDuringSession: Bool = false
+    private(set) var wasDarkBeforeBackground: Bool = false
     private(set) var lastKnownForegroundDark: Bool = false
     private(set) var lastForegroundResumeTime: CFTimeInterval = 0
     private var resumeWorkItems: [DispatchWorkItem] = []
 
     func markResignActive() {
         isHostForeground = false
+        wasDarkBeforeBackground = wasDarkBeforeBackground || lastKnownForegroundDark
+        cancelResumeTicks()
+    }
+
+    func markDidEnterBackground() {
+        markResignActive()
+        didBackgroundDuringSession = true
+    }
+
+    func markKeyboardDismissed() {
+        didBackgroundDuringSession = false
+        wasDarkBeforeBackground = false
         cancelResumeTicks()
     }
 
@@ -135,7 +149,7 @@ final class AppearanceMonitor {
 
     private func scheduleResumeTicks(onTick: @escaping (_ forceRepaint: Bool) -> Void) {
         cancelResumeTicks()
-        let delays: [TimeInterval] = [0.06, 0.18, 0.40]
+        let delays: [TimeInterval] = [0.05, 0.16, 0.35, 0.70]
         for delay in delays {
             let item = DispatchWorkItem { [weak self] in
                 guard let self, self.isHostForeground else { return }
@@ -148,7 +162,8 @@ final class AppearanceMonitor {
 
     func resolveIsDark(mode: AppearanceMode,
                        viewController: UIInputViewController,
-                       rootView: UIView) -> Bool {
+                       rootView: UIView,
+                       previousTraitStyle: UIUserInterfaceStyle? = nil) -> Bool {
         switch mode {
         case .crispLight, .pureWhite:
             return false
@@ -163,25 +178,39 @@ final class AppearanceMonitor {
             return lastKnownForegroundDark
         }
 
+        // Genuine live foreground Dark -> Light toggle (e.g. Control Center) clears background lock
+        if previousTraitStyle == .dark &&
+            viewController.traitCollection.userInterfaceStyle == .light &&
+            (CACurrentMediaTime() - lastForegroundResumeTime) > 0.25 {
+            didBackgroundDuringSession = false
+            wasDarkBeforeBackground = false
+        }
+
         let proxy = viewController.textDocumentProxy.keyboardAppearance
         let windowStyle = rootView.window?.traitCollection.userInterfaceStyle ?? .unspecified
         let sceneStyle = rootView.window?.windowScene?.traitCollection.userInterfaceStyle ?? .unspecified
         let viewStyle = rootView.traitCollection.userInterfaceStyle
         let vcStyle = viewController.traitCollection.userInterfaceStyle
         let screenStyle = (rootView.window?.windowScene?.screen ?? UIScreen.main).traitCollection.userInterfaceStyle
+        let currentStyle = UITraitCollection.current.userInterfaceStyle
 
-        let anyLocalDark = (windowStyle == .dark || sceneStyle == .dark || viewStyle == .dark || vcStyle == .dark)
+        let anyDarkSignal = (proxy == .dark ||
+                             windowStyle == .dark ||
+                             sceneStyle == .dark ||
+                             viewStyle == .dark ||
+                             vcStyle == .dark ||
+                             screenStyle == .dark ||
+                             currentStyle == .dark)
 
         let resolved: Bool
         switch proxy {
         case .dark:
             resolved = true
         case .light:
-            if anyLocalDark {
+            if anyDarkSignal {
                 resolved = true
-            } else if (CACurrentMediaTime() - lastForegroundResumeTime) < 0.6 &&
-                        lastKnownForegroundDark &&
-                        screenStyle == .dark {
+            } else if didBackgroundDuringSession && wasDarkBeforeBackground &&
+                        (CACurrentMediaTime() - lastForegroundResumeTime) < 0.8 {
                 resolved = true
             } else {
                 resolved = false
@@ -189,7 +218,9 @@ final class AppearanceMonitor {
         case .default, .alert:
             fallthrough
         @unknown default:
-            if anyLocalDark || screenStyle == .dark {
+            if anyDarkSignal {
+                resolved = true
+            } else if didBackgroundDuringSession && wasDarkBeforeBackground {
                 resolved = true
             } else if windowStyle == .unspecified && viewStyle == .unspecified && vcStyle == .unspecified {
                 resolved = lastKnownForegroundDark

@@ -192,8 +192,8 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         registerLifecycleObservers()
 
         if #available(iOS 17.0, *) {
-            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: JiaGuKeyboardViewController, _) in
-                self.syncAppearance(forceRepaint: false)
+            registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: JiaGuKeyboardViewController, previousTraitCollection: UITraitCollection) in
+                self.syncAppearance(forceRepaint: false, previousTraitStyle: previousTraitCollection.userInterfaceStyle)
             }
         }
 
@@ -232,29 +232,25 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
 
     private func registerLifecycleObservers() {
         let nc = NotificationCenter.default
-        let resignNames: [Notification.Name] = [
-            Notification.Name("NSExtensionHostWillResignActiveNotification"),
-            Notification.Name("NSExtensionHostDidEnterBackgroundNotification"),
-            UIApplication.willResignActiveNotification,
-            UIApplication.didEnterBackgroundNotification,
-        ]
-        for name in resignNames {
-            nc.addObserver(self, selector: #selector(handleHostResignActive), name: name, object: nil)
-        }
+        nc.addObserver(self, selector: #selector(handleHostWillResignActive), name: NSNotification.Name.NSExtensionHostWillResignActive, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
 
-        let activeNames: [Notification.Name] = [
-            Notification.Name("NSExtensionHostWillEnterForegroundNotification"),
-            Notification.Name("NSExtensionHostDidBecomeActiveNotification"),
-            UIApplication.willEnterForegroundNotification,
-            UIApplication.didBecomeActiveNotification,
-        ]
-        for name in activeNames {
-            nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: name, object: nil)
-        }
+        nc.addObserver(self, selector: #selector(handleHostDidEnterBackground), name: NSNotification.Name.NSExtensionHostDidEnterBackground, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+
+        nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: NSNotification.Name.NSExtensionHostWillEnterForeground, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: NSNotification.Name.NSExtensionHostDidBecomeActive, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: UIApplication.willEnterForegroundNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleHostBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
-    @objc private func handleHostResignActive() {
+    @objc private func handleHostWillResignActive() {
         appearanceMonitor.markResignActive()
+        engine.flushUserLexiconAsync()
+    }
+
+    @objc private func handleHostDidEnterBackground() {
+        appearanceMonitor.markDidEnterBackground()
         engine.flushUserLexiconAsync()
     }
 
@@ -285,6 +281,11 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         engine.flushUserLexiconAsync()
     }
 
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        appearanceMonitor.markKeyboardDismissed()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let w = rootContainer.bounds.width
@@ -311,7 +312,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
-        syncAppearance(forceRepaint: false)
+        syncAppearance(forceRepaint: false, previousTraitStyle: previousTraitCollection?.userInterfaceStyle)
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
@@ -345,11 +346,12 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
 
     // MARK: - 5-Layer Dark Mode Sync
 
-    private func syncAppearance(forceRepaint: Bool) {
+    private func syncAppearance(forceRepaint: Bool, previousTraitStyle: UIUserInterfaceStyle? = nil) {
         let isDark = appearanceMonitor.resolveIsDark(
             mode: settings.appearanceMode,
             viewController: self,
-            rootView: rootContainer
+            rootView: rootContainer,
+            previousTraitStyle: previousTraitStyle
         )
         let palette = KeyboardPalette.resolve(mode: settings.appearanceMode, isDark: isDark)
 
@@ -501,13 +503,20 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
         let committed = engine.commitCandidate(at: index, compositionFinished: &finished, synthesizedPhrase: &synth)
         guard !committed.isEmpty else { return }
 
+        var textToInsert = committed
+        if settings.autoSpaceAfterMixedEnglish {
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            if let last = before.last, last.isASCII && (last.isLetter || last.isNumber) {
+                textToInsert = " " + committed
+            }
+        }
+
         isInternalProxyMutation = true
         if finished.boolValue {
-            textDocumentProxy.insertText(committed)
+            textDocumentProxy.insertText(textToInsert)
         } else {
-            // Partial segmented selection: commit selected segment and keep remaining preedit marked
-            textDocumentProxy.unmarkText()
-            textDocumentProxy.insertText(committed)
+            // Atomic marked-text replacement: insertText replaces active marked text cleanly
+            textDocumentProxy.insertText(textToInsert)
             let rem = engine.optimisticPreedit()
             textDocumentProxy.setMarkedText(rem, selectedRange: NSRange(location: (rem as NSString).length, length: 0))
         }
@@ -543,7 +552,13 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
     func keyCanvasDidTapLetter(_ sample: SpatialTouchSample) {
         if isEnglishMode {
             engine.clearRegretHistory()
-            let chStr = (isShiftActive || isCapsLock) ? String(sample.primary).uppercased() : String(sample.primary)
+            var chStr = (isShiftActive || isCapsLock) ? String(sample.primary).uppercased() : String(sample.primary)
+            if settings.autoSpaceAfterMixedEnglish {
+                let before = textDocumentProxy.documentContextBeforeInput ?? ""
+                if let scalar = before.unicodeScalars.last, (0x4E00...0x9FFF).contains(scalar.value) {
+                    chStr = " " + chStr
+                }
+            }
             isInternalProxyMutation = true
             textDocumentProxy.insertText(chStr)
             isInternalProxyMutation = false
@@ -588,7 +603,7 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
                 textDocumentProxy.deleteBackward()
                 let trimmed = before.dropLast()
                 let prevIsDigitOrUrl = trimmed.last?.isNumber == true || trimmed.hasSuffix("www") || trimmed.hasSuffix("http")
-                let period = (isEnglishMode || prevIsDigitOrUrl) ? ". " : "。"
+                let period = prevIsDigitOrUrl ? "." : (isEnglishMode ? ". " : "。")
                 textDocumentProxy.insertText(period)
                 isInternalProxyMutation = false
                 return
@@ -632,10 +647,23 @@ final class JiaGuKeyboardViewController: UIInputViewController, KeyCanvasDelegat
     }
 
     func keyCanvasDidTapSeparator(_ symbol: String) {
+        if symbol == "分词" {
+            guard !isEnglishMode && engine.strokeCount() > 0 else { return }
+            let raw = engine.rawInputString()
+            if !raw.hasSuffix("'") {
+                engine.pushStrokePrimary(unichar(39), alt1Char: 0, alt1LogProb: 0, alt2Char: 0, alt2LogProb: 0)
+                updateOptimisticPreedit()
+                triggerAsyncDecode()
+            }
+            return
+        }
         if !isEnglishMode && engine.strokeCount() > 0 && symbol == "'" {
-            engine.pushStrokePrimary(unichar(39), alt1Char: 0, alt1LogProb: 0, alt2Char: 0, alt2LogProb: 0)
-            updateOptimisticPreedit()
-            triggerAsyncDecode()
+            let raw = engine.rawInputString()
+            if !raw.hasSuffix("'") {
+                engine.pushStrokePrimary(unichar(39), alt1Char: 0, alt1LogProb: 0, alt2Char: 0, alt2LogProb: 0)
+                updateOptimisticPreedit()
+                triggerAsyncDecode()
+            }
             return
         }
         insertDirectText(symbol)

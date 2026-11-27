@@ -565,15 +565,25 @@ DecodeOutput Decoder::decode(const std::vector<KeyStroke>& strokes,
         if (pool.size() >= 72) break;
     }
 
-    // Jianpin (Initial-letter) support for Full Pinyin (e.g. "nh" -> "你好", "zg" -> "中国")
-    if (config.mode == InputMode::FullPinyin && rawInput.size() >= 2 && rawInput.size() <= 6) {
+    // Jianpin (Initial-letter) support for both Full Pinyin and Xiaohe Shuangpin
+    if (rawInput.size() >= 2 && rawInput.size() <= 6) {
+        std::string initQuery;
+        initQuery.reserve(rawInput.size());
         bool allAlpha = true;
         for (char c : rawInput) {
             if (c < 'a' || c > 'z') { allAlpha = false; break; }
+            if (config.mode == InputMode::XiaoheShuangpin) {
+                if (c == 'v') initQuery.push_back('z');
+                else if (c == 'i') initQuery.push_back('c');
+                else if (c == 'u') initQuery.push_back('s');
+                else initQuery.push_back(c);
+            } else {
+                initQuery.push_back(c);
+            }
         }
         if (allAlpha) {
             std::vector<std::pair<std::string, float>> uInit;
-            userLex_.queryInitials(rawInput, nowSec, uInit);
+            userLex_.queryInitials(initQuery, nowSec, uInit);
             for (const auto& ur : uInit) {
                 CandidateItem item;
                 item.text = ur.first;
@@ -585,7 +595,7 @@ DecodeOutput Decoder::decode(const std::vector<KeyStroke>& strokes,
             }
 
             std::vector<uint32_t> jianpinIds;
-            sysLex_.lookupInitials(rawInput, jianpinIds);
+            sysLex_.lookupInitials(initQuery, jianpinIds);
             for (uint32_t wid : jianpinIds) {
                 const WordEntry* we = sysLex_.wordAt(wid);
                 if (!we) continue;

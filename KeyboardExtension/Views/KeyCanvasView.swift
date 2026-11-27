@@ -666,7 +666,12 @@ final class KeyCanvasView: UIView, UIInputViewAudioFeedback {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.backspaceRepeatCount += 1
-            self.delegate?.keyCanvasDidTapBackspace()
+            if !self.isComposing && self.backspaceRepeatCount >= 18 {
+                self.delegate?.keyCanvasDidTapBackspace()
+                self.delegate?.keyCanvasDidTapBackspace()
+            } else {
+                self.delegate?.keyCanvasDidTapBackspace()
+            }
             if self.backspaceRepeatCount == 4 {
                 self.backspaceTimer?.schedule(deadline: .now() + 0.048, repeating: 0.048)
             } else if self.backspaceRepeatCount == 12 {
